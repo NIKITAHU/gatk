@@ -49,6 +49,7 @@ function usage()
   echo -e "  3  UNKNOWN ARGUMENT"
   echo -e "  4  BAD CHECKSUM"
   echo -e "  5  OUTPUT DIRECTORY ALREADY EXISTS"
+  echo -e "  6  COULD NOT FIND BGZIP UTILITY"
   echo -e ""
 }
 
@@ -160,11 +161,16 @@ function downloadAndVerifyVcfFiles() {
     echo "${indentSpace}Retrieving MD5 sum file: ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${md5File} ... "
     wget ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${md5File}
 
+    # Get the VCF file, then make sure that the contig names are correct for HG19 (if applicable)
     echo "${indentSpace}Retrieving VCF file: ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${vcfFile} ... "
-    wget ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${vcfFile}
+    if [[ "${filePrefix}" == "hg19" ]] ; then
+        curl ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${vcfFile} | gunzip | sed -e 's#^\([0-9][0-9]*\)#chr\1#' -e 's#^MT#chrM#' -e 's#^X#chrX#' -e 's#^Y#chrY#' | bgzip > ${vcfFile}
+    else
+        wget ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${vcfFile}
 
-    echo "${indentSpace}Retrieving VCF Index file: ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${tbiFile} ... "
-    wget ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${tbiFile}
+        echo "${indentSpace}Retrieving VCF Index file: ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${tbiFile} ... "
+        wget ftp://ftp.ncbi.nih.gov/snp/organisms/${remoteFolder}/VCF/${tbiFile}
+    fi
 
     echo "${indentSpace}Verifying VCF checksum ..."
     if [[ "$(uname)" == "Darwin" ]] ; then
@@ -205,7 +211,9 @@ function downloadAndVerifyVcfFiles() {
 
     echo "${indentSpace}Moving files to output directory ..."
     mv ${vcfFile} ${outputFolder}/${filePrefix}_${vcfFile}
-    mv ${tbiFile} ${outputFolder}/${filePrefix}_${tbiFile}
+    if [[ ! "${filePrefix}" == "hg19" ]] ; then
+        mv ${tbiFile} ${outputFolder}/${filePrefix}_${tbiFile}
+    fi
     rm ${md5File}
 
     echo "${indentSpace}Creating Config File ... "
@@ -258,6 +266,14 @@ if [[ -d ${OUT_DIR_NAME} ]] ; then
     exit 5
 fi
 
+# Make sure bgzip exists:
+which bgzip > /dev/null
+r=$?
+if [[ $r -ne 0 ]] ; then
+    error "bgzip utility not found on path.  You must have bgzip installed to get the dbSNP resource.  Please install bgzip and try again. - aborting!"
+    exit 6
+fi
+
 echo "Querying NCBI listing..."
 tmpListing="$( makeTemp )"
 curl ftp://ftp.ncbi.nih.gov/snp/organisms/ 2>/dev/null > ${tmpListing}
@@ -274,5 +290,14 @@ echo "Processing HG38 ..."
 hg38Version=$( cat ${tmpListing} | awk '{print $9}' | grep 'human' | grep 'GRCh38' | grep "b${BUILD_NUMBER}" )
 
 downloadAndVerifyVcfFiles ${hg38Version} ${OUT_DIR_NAME}/hg38 "hg38"
+
+echo -e "\033[1;33;40m##################################################################################\033[0;0m"
+echo -e "\033[1;33;40m#                                                                                #\033[0;0m"
+echo -e "\033[1;33;40m# \033[1;5;37;41mWARNING\033[0;0m: You \033[4;37;40mMUST\033[0;0m index the VCF files for \033[4;37;40mHG19\033[0;0m #\033[0;0m"
+echo -e "\033[1;33;40m#             before using this data source.                                     #\033[0;0m"
+echo -e "\033[1;33;40m#                                                                                #\033[0;0m"
+echo -e "\033[1;33;40m#             Use gatk IndexFeatureFile <GTF_FILE>                               #\033[0;0m"
+echo -e "\033[1;33;40m#                                                                                #\033[0;0m"
+echo -e "\033[1;33;40m##################################################################################\033[0;0m"
 
 exit 0

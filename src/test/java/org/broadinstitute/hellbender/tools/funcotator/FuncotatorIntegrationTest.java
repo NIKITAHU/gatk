@@ -247,6 +247,12 @@ public class FuncotatorIntegrationTest extends CommandLineProgramTest {
                         "Homo_sapiens_assembly19.fasta",
                         true,
                         FuncotatorTestConstants.REFERENCE_VERSION_HG19
+                },
+                {
+                        "hg38_trio.vcf",
+                        "Homo_sapiens_assembly38.fasta",
+                        false,
+                        FuncotatorTestConstants.REFERENCE_VERSION_HG38
                 }
         };
     }
@@ -394,7 +400,7 @@ public class FuncotatorIntegrationTest extends CommandLineProgramTest {
     }
 
     /**
-     * Test that we can annotate a hg19 datasource when GENCODE is using "chr*" and the datasource is not.
+     * Test that we can annotate using hg19 data sources when the input is B37.
      */
     @Test
     public void testCanAnnotateMixedContigHg19Clinvar() {
