@@ -10,6 +10,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.broadinstitute.hellbender.CommandLineProgramTest;
 import org.broadinstitute.hellbender.engine.FeatureDataSource;
 import org.broadinstitute.hellbender.exceptions.GATKException;
+import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.copynumber.utils.annotatedinterval.AnnotatedIntervalCollection;
 import org.broadinstitute.hellbender.tools.funcotator.dataSources.gencode.GencodeFuncotation;
 import org.broadinstitute.hellbender.tools.funcotator.dataSources.xsv.SimpleKeyXsvFuncotationFactory;
@@ -31,6 +32,7 @@ import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.broadinstitute.hellbender.tools.funcotator.FuncotatorUtils.extractFuncotatorKeysFromHeaderDescription;
 
@@ -50,6 +52,11 @@ public class FuncotatorIntegrationTest extends CommandLineProgramTest {
     private static final boolean doDebugTests = false;
     private static final String LARGE_DATASOURCES_FOLDER = "funcotator_dataSources_latest";
 
+        private static final String NOT_M2_TEST_HG19 = toolsTestDir + "funcotator/NotM2_test_custom_maf_fields.vcf";
+    private static final String M2_TEST_HG19 = toolsTestDir + "funcotator/M2_test_custom_maf_fields.vcf";
+    private static final String NOT_M2_TEST_HG19_TUMOR_ONLY = toolsTestDir + "funcotator/NotM2_test_custom_maf_fields_tumor_only.vcf";
+    private static final String M2_TEST_HG19_TUMOR_ONLY = toolsTestDir + "funcotator/M2_test_custom_maf_fields_tumor_only.vcf";
+    private static final String THREE_SAMPLE_SOMATIC = toolsTestDir + "funcotator/Three_sample_somatic.vcf";
     private static final String PIK3CA_VCF_HG19          = toolsTestDir + "funcotator" + File.separator + "0816201804HC0_R01C01.pik3ca.vcf";
     private static final String PIK3CA_VCF_HG38          = toolsTestDir + "funcotator" + File.separator + "hg38_trio.pik3ca.vcf";
     private static final String PIK3CA_VCF_HG19_SNPS     = toolsTestDir + "funcotator" + File.separator + "PIK3CA_SNPS_3.vcf";
@@ -398,7 +405,7 @@ public class FuncotatorIntegrationTest extends CommandLineProgramTest {
     }
 
     /**
-     * Test that we can annotate a hg19 datasource when GENCODE is using "chr*" and the datasource is not.
+     * Test that we can annotate a b37 (here it is clinvar) datasource when GENCODE is using "chr*" and the datasource is not.
      */
     @Test
     public void testCanAnnotateMixedContigHg19Clinvar() {
@@ -745,7 +752,7 @@ public class FuncotatorIntegrationTest extends CommandLineProgramTest {
         // Needs to get aliases from the MAF, since AF (and maybe more) has its name changed.  So create a dummy
         //  MafOutputRenderer that mimics the one that is used in the command line invocation above and get the aliases.
         final File dummyOutputFile = getOutputFile(outputFormatType);
-        final MafOutputRenderer dummyMafOutputRenderer = new MafOutputRenderer(dummyOutputFile.toPath(), Collections.emptyList(), null, new LinkedHashMap<>(), new LinkedHashMap<>(), new HashSet<>());
+        final MafOutputRenderer dummyMafOutputRenderer = new MafOutputRenderer(dummyOutputFile.toPath(), Collections.emptyList(), new VCFHeader(), new LinkedHashMap<>(), new LinkedHashMap<>(), new HashSet<>());
         final Map<String, Set<String>> mafAliasMap = dummyMafOutputRenderer.getReverseOutputFieldNameMap();
 
         // Get all of the alias lists
@@ -802,6 +809,141 @@ public class FuncotatorIntegrationTest extends CommandLineProgramTest {
         // Make sure that none of the input fields appear in the funcotation header.
         final Set<String> funcotationKeys = new HashSet<>(Arrays.asList(extractFuncotatorKeysFromHeaderDescription(funcotationHeaderLine.getDescription())));
         Assert.assertEquals(Sets.intersection(funcotationKeys, PIK3CA_VCF_HG19_INPUT_FIELDS).size(), 0);
+    }
+
+    @DataProvider
+    public Object[][] provideTNVcfs() {
+        // These two VCFs are exactly the same, except how the sample names are handled.
+        return new Object[][] {
+                {NOT_M2_TEST_HG19},
+                {M2_TEST_HG19}
+        };
+    }
+    @Test(dataProvider = "provideTNVcfs")
+    public void testMafCustomCountFields(final String tnVcf) {
+        final FuncotatorArgumentDefinitions.OutputFormatType outputFormatType = FuncotatorArgumentDefinitions.OutputFormatType.MAF;
+        final File outputFile = getOutputFile(outputFormatType);
+
+        final ArgumentsBuilder arguments = new ArgumentsBuilder();
+
+        arguments.addVCF(new File(tnVcf));
+        arguments.addOutput(outputFile);
+        arguments.addReference(new File(b37Chr3Ref));
+        arguments.addArgument(FuncotatorArgumentDefinitions.DATA_SOURCES_PATH_LONG_NAME, DS_PIK3CA_DIR);
+        arguments.addArgument(FuncotatorArgumentDefinitions.REFERENCE_VERSION_LONG_NAME, FuncotatorTestConstants.REFERENCE_VERSION_HG19);
+        arguments.addArgument(FuncotatorArgumentDefinitions.OUTPUT_FORMAT_LONG_NAME, outputFormatType.toString());
+        arguments.addBooleanArgument(FuncotatorArgumentDefinitions.ALLOW_HG19_GENCODE_B37_CONTIG_MATCHING_LONG_NAME, true);
+        arguments.addArgument(FuncotatorArgumentDefinitions.TRANSCRIPT_SELECTION_MODE_LONG_NAME, TranscriptSelectionMode.CANONICAL.toString());
+
+        runCommandLine(arguments);
+
+        final AnnotatedIntervalCollection maf = AnnotatedIntervalCollection.create(outputFile.toPath(), null);
+
+        // Painstakingly lifted from the input VCF file
+        final int[] tRefCounts = new int[]{42, 44, 117, 16, 24, 23};
+        final int[] tAltCounts = new int[]{3, 2, 4, 6, 8, 7};
+        final int[] nRefCounts = new int[]{43, 45, 145, 22, 45, 13};
+        final int[] nAltCounts = new int[]{1, 1, 4, 0, 0, 0};
+        final double[] tumorF = new double[]{0.075, 0.049, 0.034, 0.278, 0.259, 0.19};
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Integer.parseInt(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_t_alt_count)),
+                   tAltCounts[i], "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Integer.parseInt(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_t_ref_count)),
+                    tRefCounts[i], "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Integer.parseInt(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_n_ref_count)),
+                    nRefCounts[i], "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Integer.parseInt(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_n_alt_count)),
+                    nAltCounts[i], "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Double.parseDouble(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_tumor_f)),
+                    tumorF[i], "Record did not match GT at entry " + i));
+    }
+    @DataProvider
+    public Object[][] provideTOnlyVcfs() {
+        // These two VCFs are exactly the same, except how the sample names are handled.
+        return new Object[][] {
+                {NOT_M2_TEST_HG19_TUMOR_ONLY},
+                {M2_TEST_HG19_TUMOR_ONLY}
+        };
+    }
+    @Test(dataProvider = "provideTOnlyVcfs")
+    public void testMafCustomCountFieldsTumorOnly(final String tnVcf) {
+        final FuncotatorArgumentDefinitions.OutputFormatType outputFormatType = FuncotatorArgumentDefinitions.OutputFormatType.MAF;
+        final File outputFile = getOutputFile(outputFormatType);
+
+        final ArgumentsBuilder arguments = new ArgumentsBuilder();
+
+        arguments.addVCF(new File(tnVcf));
+        arguments.addOutput(outputFile);
+        arguments.addReference(new File(b37Chr3Ref));
+        arguments.addArgument(FuncotatorArgumentDefinitions.DATA_SOURCES_PATH_LONG_NAME, DS_PIK3CA_DIR);
+        arguments.addArgument(FuncotatorArgumentDefinitions.REFERENCE_VERSION_LONG_NAME, FuncotatorTestConstants.REFERENCE_VERSION_HG19);
+        arguments.addArgument(FuncotatorArgumentDefinitions.OUTPUT_FORMAT_LONG_NAME, outputFormatType.toString());
+        arguments.addBooleanArgument(FuncotatorArgumentDefinitions.ALLOW_HG19_GENCODE_B37_CONTIG_MATCHING_LONG_NAME, true);
+        arguments.addArgument(FuncotatorArgumentDefinitions.TRANSCRIPT_SELECTION_MODE_LONG_NAME, TranscriptSelectionMode.CANONICAL.toString());
+
+        runCommandLine(arguments);
+
+        final AnnotatedIntervalCollection maf = AnnotatedIntervalCollection.create(outputFile.toPath(), null);
+
+        // Painstakingly lifted from the input VCF file
+        final int[] tRefCounts = new int[]{42, 44, 117, 16, 24, 23};
+        final int[] tAltCounts = new int[]{3, 2, 4, 6, 8, 7};
+        final double[] tumorF = new double[]{0.075, 0.049, 0.034, 0.278, 0.259, 0.19};
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Integer.parseInt(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_t_alt_count)),
+                   tAltCounts[i], "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Integer.parseInt(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_t_ref_count)),
+                    tRefCounts[i], "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_n_ref_count),
+                    "", "Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_n_alt_count),
+                        "","Record did not match GT at entry " + i));
+
+        IntStream.range(0, maf.getRecords().size()).boxed()
+                .forEach(i -> Assert.assertEquals(Double.parseDouble(maf.getRecords().get(i).getAnnotationValue(MafOutputRendererConstants.FieldName_tumor_f)),
+                    tumorF[i], "Record did not match GT at entry " + i));
+    }
+
+    /**
+     * Test that an input file with more than one possible tumor-normal pairing fails.
+     */
+    @Test(expectedExceptions = UserException.BadInput.class)
+    public void testMoreThanOneTNPair() {
+        runSomaticVcf(THREE_SAMPLE_SOMATIC);
+    }
+
+    private void runSomaticVcf(final String vcfFile) {
+        final FuncotatorArgumentDefinitions.OutputFormatType outputFormatType = FuncotatorArgumentDefinitions.OutputFormatType.MAF;
+        final File outputFile = getOutputFile(outputFormatType);
+
+        final ArgumentsBuilder arguments = new ArgumentsBuilder();
+
+        arguments.addVCF(new File(vcfFile));
+        arguments.addOutput(outputFile);
+        arguments.addReference(new File(b37Chr3Ref));
+        arguments.addArgument(FuncotatorArgumentDefinitions.DATA_SOURCES_PATH_LONG_NAME, DS_PIK3CA_DIR);
+        arguments.addArgument(FuncotatorArgumentDefinitions.REFERENCE_VERSION_LONG_NAME, FuncotatorTestConstants.REFERENCE_VERSION_HG19);
+        arguments.addArgument(FuncotatorArgumentDefinitions.OUTPUT_FORMAT_LONG_NAME, outputFormatType.toString());
+        arguments.addBooleanArgument(FuncotatorArgumentDefinitions.ALLOW_HG19_GENCODE_B37_CONTIG_MATCHING_LONG_NAME, true);
+        arguments.addArgument(FuncotatorArgumentDefinitions.TRANSCRIPT_SELECTION_MODE_LONG_NAME, TranscriptSelectionMode.CANONICAL.toString());
+
+        runCommandLine(arguments);
     }
 }
 
